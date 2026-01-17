@@ -9,29 +9,7 @@ add_executable(${PROJECT_NAME}
 
 set_target_properties(${PROJECT_NAME} PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
-)
-
-if(WIN32)
-    set(SFML_STATIC_LIBRARIES TRUE)
-    set(SFML_USE_STATIC_STD_LIBS TRUE)
-    add_subdirectory(external/sfml sfml)
-    target_compile_definitions(${PROJECT_NAME} PRIVATE SFML_STATIC)
-
-    target_compile_options(${PROJECT_NAME} PRIVATE -static -static-libgcc -static-libstdc++)
-    target_link_options(${PROJECT_NAME} PRIVATE -static -static-libgcc -static-libstdc++)
-
-    target_compile_definitions(${PROJECT_NAME} PRIVATE -DNO_PTHREAD)
-else()
-    set(SFML_STATIC_LIBRARIES FALSE)
-    add_subdirectory(external/sfml sfml)
-endif()
-
-target_link_libraries(${PROJECT_NAME} PRIVATE
-    sfml-system
-    sfml-window
-    sfml-graphics
-    sfml-audio
-    sfml-network
+    CXX_STANDARD 23
 )
 
 add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
@@ -40,23 +18,57 @@ add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
     "${CMAKE_BINARY_DIR}/bin/res"
 )
 
-function(copy_runtime_deps TARGET_NAME)
-    set(DEST_DIR "${CMAKE_BINARY_DIR}/bin/libs")
+option(STATIC_EXE "OFF = dynamic linking, ON = static linking" ON)
 
-    if(UNIX AND NOT APPLE)
-        message(STATUS "Copying runtime .so for Linux")
-        add_custom_command(TARGET ${TARGET_NAME} POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E make_directory "${DEST_DIR}"
-        )
-        add_custom_command(TARGET ${TARGET_NAME} POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -DINPUT=$<TARGET_FILE:${TARGET_NAME}> -DOUTPUT=${DEST_DIR}
-                    -P ${CMAKE_SOURCE_DIR}/cmake/copy_linux_deps.cmake
-        )
-        set_target_properties(${TARGET_NAME} PROPERTIES
-            BUILD_RPATH "\$ORIGIN/libs"
-            INSTALL_RPATH "\$ORIGIN/libs"
-        )
+if (${STATIC_EXE})
+    message(STATUS "Using DYNAMIC linking...")
+
+    if(WIN32)
+        set(SFML_STATIC_LIBRARIES TRUE)
+        set(SFML_USE_STATIC_STD_LIBS TRUE)
+        target_compile_definitions(${PROJECT_NAME} PRIVATE SFML_STATIC)
+
+        target_compile_options(${PROJECT_NAME} PRIVATE -static -static-libgcc -static-libstdc++)
+        target_link_options(${PROJECT_NAME} PRIVATE -static -static-libgcc -static-libstdc++)
+
+        target_compile_definitions(${PROJECT_NAME} PRIVATE -DNO_PTHREAD)
+    else()
+        set(SFML_STATIC_LIBRARIES FALSE)
     endif()
-endfunction()
+else()
+    message(STATUS "Using STATIC linking...")
+endif()
 
-copy_runtime_deps(${PROJECT_NAME})
+add_subdirectory(external/sfml sfml)
+
+target_link_libraries(${PROJECT_NAME} PRIVATE
+    "sqlite3"
+    "sfml-system"
+    "sfml-window"
+    "sfml-graphics"
+    "sfml-audio"
+    "sfml-network"
+)
+
+if (${STATIC_EXE})
+    function(copy_runtime_deps TARGET_NAME)
+        set(DEST_DIR "${CMAKE_BINARY_DIR}/bin/libs")
+
+        if(UNIX AND NOT APPLE)
+            message(STATUS "Copying runtime .so for Linux")
+            add_custom_command(TARGET ${TARGET_NAME} POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E make_directory "${DEST_DIR}"
+            )
+            add_custom_command(TARGET ${TARGET_NAME} POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -DINPUT=$<TARGET_FILE:${TARGET_NAME}> -DOUTPUT=${DEST_DIR}
+                        -P ${CMAKE_SOURCE_DIR}/cmake/copy_linux_deps.cmake
+            )
+            set_target_properties(${TARGET_NAME} PROPERTIES
+                BUILD_RPATH "\$ORIGIN/libs"
+                INSTALL_RPATH "\$ORIGIN/libs"
+            )
+        endif()
+    endfunction()
+
+    copy_runtime_deps(${PROJECT_NAME})
+endif()

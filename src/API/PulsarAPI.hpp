@@ -1,68 +1,32 @@
 #pragma once
 
 #include <SFML/Network.hpp>
-#include <iostream>
 #include <thread>
 #include <list>
-#include <atomic>
-#include <string>
+#include <iostream>
 #include <mutex>
-#include <condition_variable>
-#include <chrono>
 
-#include "../lib/jsonlib.h"
-#include "../lib/hash.h"
-#include "../Other/Datetime.hpp"
 #include "../Other/Chat.hpp"
 #include "../Network/Database.hpp"
+#include "../Other/Message.hpp"
+#include "../Other/Profile.hpp"
+#include "../lib/hash.h"
 #include "../Network/Checker.hpp"
+#include "../Encryption/EndPoint.hpp"
 
 class PulsarAPI {
 private:
-    sf::TcpSocket& socket;
-    std::string name;
+    struct ServerResponse {
+        std::string req, rsp;
+    };
+
+    std::shared_ptr<sf::TcpSocket> socket;
+    std::string username;
     Database db;
-    std::list<std::string> server_responses;
-    std::atomic_bool connected = true;
-    std::mutex responses_mutex;
-    std::condition_variable responses_cv;
-
-    std::string waitForServerResponse(const std::string& expectedType, const std::string& additional = "", int32_t timeout_ms = PULSAR_TIMEOUT_MS) {
-        auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
-
-        std::unique_lock<std::mutex> lock(responses_mutex);
-        while (std::chrono::steady_clock::now() < deadline) {
-            for (auto it = server_responses.begin(); it != server_responses.end(); ++it) {
-                const std::string response = *it;
-                try {
-                    auto json = Json::parse(response);
-                    if (json.contains("type") && json["type"] == expectedType) {
-                        std::string out = response;
-                        server_responses.erase(it);
-                        return out;
-                    }
-                } catch (...) {
-                    bool starts = false;
-                    if (response.size() >= expectedType.size() && response.substr(0, expectedType.size()) == expectedType) starts = true;
-                    else if (response.size() >= expectedType.size() + 1 && (response[0] == '+' || response[0] == '-') && response.substr(1, expectedType.size()) == expectedType) starts = true;
-
-                    if (starts && (additional.empty() || response.find(additional) != std::string::npos)) {
-                        std::string out = response;
-                        server_responses.erase(it);
-                        return out;
-                    }
-                }
-                #ifdef PULSAR_DEBUG
-                    std::cerr << "[DEBUG]: Type not matched: " << response << std::endl;
-                #endif
-            }
-
-            responses_cv.wait_for(lock, std::chrono::milliseconds(50));
-        }
-
-        std::cout << "Вышло время ожидания для запроса: " << expectedType << ", " << additional << std::endl;
-        return "";
-    }
+    std::thread recv_thr;
+    std::atomic_bool connected = false;
+    std::list<ServerResponse> responses;
+    std::mutex responses_mtx;
 public:
     enum LoginResult {
         Success,
@@ -71,70 +35,214 @@ public:
         Fail_Unknown
     };
 
-    PulsarAPI(sf::TcpSocket& sock, const std::string& username) : socket(sock), name(username), db(username) {
+    PulsarAPI(std::shared_ptr<sf::TcpSocket> socket, const std::string& username)
+     : socket(socket), username(username), db(username) {
         if (!Checker::checkUsername(username)) PULSAR_THROW UsernameFailed(username);
     }
-    
-    std::string getName() const { return name; }
-    sf::TcpSocket& getSocket() const { return socket; }
 
-    void disconnect() {
-        if (!connected) return;
-        connected = false;
-        socket.disconnect();
-        std::cout << "Отключено от сервера." << std::endl;
-        exit(0);
+    std::shared_ptr<sf::TcpSocket> getSocket() { return socket; }
+
+    bool connect(const std::string& ip, unsigned short port) {
+        if (!socket) socket = std::make_shared<sf::TcpSocket>();
+
+        sf::Socket::Status status = socket->connect(*sf::IpAddress::resolve(ip), port, sf::milliseconds(PULSAR_TIMEOUT_MS));
+
+        if (status != sf::Socket::Status::Done) {
+            std::cout << "Невозможно подключиться к " << ip << ":" << port << std::endl;
+            std::cout << "Удостоверьтесь, что сервер работает и доступен." << std::endl;
+            return false;
+        }
+
+        std::cout << "Conneted to " << ip << ":" << port << std::endl;
+        connected = true;
+        return true;
     }
 
-    void sendMessage(const std::string& message, const std::string& dest) {
-        /*
-            Message format (JSON):
-            {
-                "type": "message",
-                "time": current time (integer, seconds since epoch),
-                "src": "this client username",
-                "dst": "destination (channel or user)"
-                "msg": "your message text"
-            }
-        */
+    void disconnect() {
+        socket->disconnect();
+        connected = false;
+        std::cout << "Отключено от сервера." << std::endl;
+    }
 
-        auto json = Json({
-            // sending without id; server will assign one
-            {"type", "message"},
-            {"time", Datetime::now().toTime()},
-            {"src", name},
-            {"dst", dest},
-            {"msg", message}
-        });
+    bool isConnected() { return connected; }
 
-        std::string msg = jsonToString(json);
-        
-        if (socket.send(msg.data(), msg.size()) != sf::Socket::Status::Done) {
+    void sendRaw(const std::string& raw) {
+        if (!connected) return;
+        if (socket->send(raw.data(), raw.size()) != sf::Socket::Status::Done) {
             std::cout << "Не удалось отправить сообщение" << std::endl;
             disconnect();
         }
     }
 
+    void send(const Message& msg) {
+        sendRaw(msg.to_payload());
+    }
+
+    void send(const std::string& message, const std::string& dest) {
+        send(Message {
+            0, Datetime::now().toTime(),
+            username, dest, message
+        });
+    }
+
+    std::string recvRaw() {
+        if (!connected) return {};
+
+        char buffer[PULSAR_PACKET_SIZE];
+        size_t recieved;
+        if (socket->receive(buffer, sizeof(buffer), recieved) != sf::Socket::Status::Done) {
+            std::cout << "Не удалось получить сообщение" << std::endl;
+            disconnect();
+        }
+
+        return std::string { buffer, recieved };
+    }
+
+    Message recv() {
+        return Message::from_payload(recvRaw());
+    }
+
+    void recieverLoop() {
+        while (connected) {
+            auto message = recv();
+
+            if (message.get_src() == "!server.msg") {
+                storeResponse(parseServer(message.get_msg()));
+            }
+
+            else {
+                std::cout << message << std::endl;
+            }
+
+            sf::sleep(sf::milliseconds(20));
+        }
+    }
+
+    void startRecieverLoop() {
+        recv_thr = std::thread { &PulsarAPI::recieverLoop, this };
+        recv_thr.detach();
+    }
+
+    ServerResponse parseServer(const std::string& message) {
+        #ifdef PULSAR_DEBUG
+            std::cout << "Server message:\n\traw: \"" << message << "\"\n\tparsed: ";
+        #endif
+
+        ServerResponse res;
+        const char SEP = '\x1e';
+        const std::string REQ_PREF = "REQ:";
+        const std::string RSP_PREF = "RSP:";
+
+        auto trim = [](std::string s){
+            size_t a = 0, b = s.size();
+            while (a < b && std::isspace((unsigned char)s[a])) ++a;
+            while (b > a && std::isspace((unsigned char)s[b-1])) --b;
+            return s.substr(a, b - a);
+        };
+
+        std::string left, right;
+        auto pos = message.find(SEP);
+        if (pos == std::string::npos) {
+            auto rsp_pos = message.find("RSP:");
+            if (rsp_pos != std::string::npos) {
+                left = message.substr(0, rsp_pos);
+                right = message.substr(rsp_pos);
+            } else {
+                left = message;
+                right = "";
+            }
+        } else {
+            left = message.substr(0, pos);
+            right = message.substr(pos + 1);
+        }
+
+        left = trim(left);
+        right = trim(right);
+
+        if (left.rfind(REQ_PREF, 0) == 0) res.req = trim(left.substr(REQ_PREF.size()));
+        else res.req = left;
+
+        if (right.rfind(RSP_PREF, 0) == 0) res.rsp = trim(right.substr(RSP_PREF.size()));
+        else res.rsp = right;
+
+        #ifdef PULSAR_DEBUG
+            std::cout << "REQ=\"" << res.req << "\" RSP=\"" << res.rsp << "\"" << std::endl;
+        #endif
+
+        return res;
+    }
+
+    void storeResponse(const ServerResponse& resp) {
+        std::lock_guard lk(responses_mtx);
+
+        responses.push_front(resp);
+
+        if (responses.size() > PULSAR_MAX_RESPONSES) responses.pop_back();
+    }
+
+    std::string requestRaw(const std::string& req) {
+        if (!connected) return {};
+
+        send(req, "!server.req");
+
+        sf::Clock clk;
+
+        while (clk.getElapsedTime().asMilliseconds() < PULSAR_TIMEOUT_MS) {
+            {
+                std::lock_guard lk(responses_mtx);
+    
+                for (auto i = responses.begin(); i != responses.end(); i++) {
+                    if (i->req == req) {
+                        auto ans = i->rsp;
+                        responses.erase(i);
+                        return ans;
+                    }
+                }
+            }
+
+            sf::sleep(sf::milliseconds(20));
+        }
+
+        return {};
+    }
+
+    template<class... Args>
+    std::string request(const std::string& req_command, Args&&... args) {
+        std::ostringstream oss;
+        oss << '!' << req_command;
+        ((oss << ' ' << std::forward<Args>(args)), ...);
+
+        return requestRaw(oss.str());
+    }
+
+    std::string request(const std::string& req_command) {
+        return requestRaw("!" + req_command);
+    }
+
+    /// Common API
+
+    void sendRsaKey(PulsarCrypto::Asymmetrical::RSA::key pub) {
+        auto response = request("rsa", pub.n, pub.s);
+    }
+
     bool joinChannel(const std::string& channel) {
-        auto response = request("join", channel, channel);
-        if (response.find("+join") != std::string::npos && response.find(channel) != std::string::npos) {
-            std::cout << "Вы присоединились к каналу " << channel << std::endl;
+        auto response = request("join", channel);
+
+        if (response == "+") {
             db.join(channel);
             return true;
         } else {
-            std::cout << "Не удалось присоединиться к каналу " << channel << std::endl;
             return false;
         }
     }
 
     bool leaveChannel(const std::string& channel) {
-        auto response = request("leave", channel, channel);
-        if (response.find("+leave") != std::string::npos && response.find(channel) != std::string::npos) {
-            std::cout << "Вы покинули канал " << channel << std::endl;
+        auto response = request("leave", channel);
+
+        if (response == "+") {
             db.leave(channel);
             return true;
         } else {
-            std::cout << "Не удалось покинуть канал " << channel << std::endl;
             return false;
         }
     }
@@ -142,263 +250,127 @@ public:
     bool createChannel(const std::string& channel) {
         if (!Checker::checkChannelName(channel)) PULSAR_THROW ChannelNameFailed(channel);
 
-        auto response = request("create", channel, channel);
-        if (response.find("+create") != std::string::npos && response.find(channel) != std::string::npos) {
-            std::cout << "Создан канал " << channel << std::endl;
+        auto response = request("create", channel);
+
+        if (response == "+") {
             joinChannel(channel);
             return true;
         } else {
-            std::cout << "Не удалось создать канал " << channel << std::endl;
             return false;
-        }
-    }
-
-    bool createContact(const std::string& username, const std::string& contact) {
-        if (!Checker::checkUsername(username)) PULSAR_THROW UsernameFailed(username);
-
-        auto response = request("db contact add", jsonToString(Json::array({username, contact})));
-        if (response.find("+db contact add") != std::string::npos && response.find(username) != std::string::npos) {
-            std::cout << "Создан контакт " << '"' << contact << '"' << std::endl;
-            db.add_contact(username, contact);
-            return true;
-        } else {
-            std::cout << "Не удалось создать контакт " << '"' << contact << '"' << std::endl;
-            return false;
-        }
-    }
-
-    bool removeContact(const std::string& contact) {
-        if (!Checker::checkUsername(contact)) PULSAR_THROW UsernameFailed(contact);
-
-        auto response = request("db contact rem", contact);
-        if (response.find("+db contact rem") != std::string::npos && response.find(contact) != std::string::npos) {
-            std::cout << "Удален контакт " << '"' << contact << '"' << std::endl;
-            db.remove_contact(contact);
-            return true;
-        } else {
-            std::cout << "Не удалось удалить контакт " << '"' << contact << '"' << std::endl;
-            return false;
-        }
-    }
-
-    void updateProfile(const Profile& profile) {
-        db.update_profile(profile);
-
-        auto response = request("profile", jsonToString(Json::array({"set", name, profile.toJson()})));
-        if (response.find("profile set") != std::string::npos && response.find(name) != std::string::npos) {
-            std::cout << "Профиль обновлен" << std::endl;
-        }
-    }
-
-    Profile getProfile(const std::string& username) {
-        auto response = request("profile", jsonToString(Json::array({"get", username})));
-        if (response.find("profile get") != std::string::npos) {
-            try {
-                auto parsed = Json::parse(response.substr(12));
-                return Profile::fromJson(parsed);
-            } catch (const std::exception& e) {
-                std::cerr << "Failed to parse profile JSON: " << e.what() << std::endl;
-                return PULSAR_NO_PROFILE;
-            } catch (...) {
-                std::cerr << "Unknown error parsing profile JSON" << std::endl;
-                return PULSAR_NO_PROFILE;
-            }
-        } else {
-            return PULSAR_NO_PROFILE;
         }
     }
 
     LoginResult login(const std::string& password) {
-        auto response = request("login", jsonToString(Json::array({name, password})));
+        auto response = request("login", username, password);
 
-        if (response.find("login success") != std::string::npos) {
+        if (response == "success") {
             return LoginResult::Success;
-        } else if (response.find("login fail_username") != std::string::npos) {
-            std::cout << "Ошибка входа: неверное имя пользователя" << std::endl;
+        } else if (response == "fail_username") {
             return LoginResult::Fail_Username;
-        } else if (response.find("login fail_password") != std::string::npos) {
-            std::cout << "Ошибка входа: неверный пароль" << std::endl;
+        } else if (response == "fail_password") {
             return LoginResult::Fail_Password;
         } else {
-            std::cout << "Ошибка входа: неизвестная ошибка" << std::endl;
             return LoginResult::Fail_Unknown;
         }
     }
 
     LoginResult registerUser(const std::string& password) {
-        auto response = request("register", jsonToString(Json::array({name, password})));
+        auto response = request("register", username, password);
 
-        if (response.find("+register") != std::string::npos) {
+        if (response == "success") {
             return LoginResult::Success;
-        } else if (response.find("-register") != std::string::npos) {
-            std::cout << "Ошибка регистрации: пользователь уже существует" << std::endl;
+        } else if (response == "fail_username") {
             return LoginResult::Fail_Username;
         } else {
-            std::cout << "Ошибка регистрации: неизвестная ошибка" << std::endl;
             return LoginResult::Fail_Unknown;
         }
     }
 
-    Chat getChat(const std::string& channel) {
-        if (!Checker::checkChannelName(channel) && channel[0] != '@') PULSAR_THROW ChannelNameFailed(channel);
-        auto response = request("chat", channel, channel);
-        try {
-            auto json = Json::parse(response.substr(5, std::string::npos));
-            if (!json.contains("chat") || !json.contains("name")) {
-                std::cerr << "Malformed chat response: " << response << std::endl;
-                return Chat("", {});
-            }
-            std::vector<std::string> vec = json["chat"];
-            return Chat(json["name"], vec);
-        } catch (const std::exception& e) {
-            std::cerr << "Failed to parse chat JSON: " << e.what() << " Response: " << response << std::endl;
-            return Chat("", {});
-        } catch (...) {
-            std::cerr << "Unknown error parsing chat JSON. Response: " << response << std::endl;
-            return Chat("", {});
-        }
+    Profile getProfile(const std::string& username) {
+        auto response = request("profile", "get", username);
+
+        return Profile::from_payload(response);
     }
 
-    bool requestDb() {
-        auto response = request("db user", name);
-        try {
-            auto json = Json::parse(response.substr(8, std::string::npos));
-            db.init(json);
+    bool updateProfile(const Profile& profile) {
+        auto response = request("profile", "set", profile.to_payload());
+
+        return response == "+";
+    }
+
+    bool createContact(const std::string& username, const std::string& contact) {
+        if (!Checker::checkUsername(username)) PULSAR_THROW UsernameFailed(username);
+
+        auto response = request("contact", "add", username, contact);
+
+        if (response == "+") {
+            db.add_contact(username, contact);
             return true;
-        } catch (const std::exception& e) {
-            std::cout << "Не удалось обработать запрос базы данных: " << e.what() << std::endl;
-            return false;
-        } catch (...) {
-            std::cout << "Не удалось обработать запрос базы данных: неизвестная ошибка" << std::endl;
-            return false;
-        }
+        } else return false;
+    }
+
+    bool removeContact(const std::string& contact) {
+        if (!Checker::checkUsername(contact)) PULSAR_THROW UsernameFailed(contact);
+
+        auto response = request("contact", "rem", contact);
+        if (response == "+") {
+            db.remove_contact(contact);
+            return true;
+        } else return false;
+    }
+
+    Chat getChat(const std::string& chat, int lines_count = 50) {
+        if (!Checker::checkChannelName(chat) && chat[0] != '@') PULSAR_THROW ChannelNameFailed(chat);
+
+        auto response = request("chat", chat, lines_count);
+        return Chat { chat, split(response, PULSAR_SEP) };
     }
 
     bool isChannelMember(const std::string& channel) {
         if (!Checker::checkChannelName(channel) && channel[0] != '@' && channel[0] != '!' && channel != "") PULSAR_THROW ChannelNameFailed(channel);
+
         return db.is_channel_member(channel);
     }
 
-    std::string getDbString() {
-        return db.getString();
-    }
+    Message getMessageById(const std::string chat, size_t id) {
+        auto response = request("msg", chat, id);
 
-    std::string getLastResponse() {
-        std::lock_guard<std::mutex> lock(responses_mutex);
-        if (server_responses.empty()) return std::string();
-        return server_responses.back();
-    }
+        auto msg = Message::from_payload(response);
 
-    Message receiveLastMessage() {
-        if (!connected) return PULSAR_NO_MESSAGE;
-        char buffer[PULSAR_PACKET_SIZE];
-        std::size_t received;
-        if (socket.receive(buffer, sizeof(buffer), received) != sf::Socket::Status::Done) {
-            disconnect();
-            return PULSAR_NO_MESSAGE;
-        }
-
-        std::string msg(buffer, received);
-        try {
-            Json json = Json::parse(msg);
-            if (json.contains("type") && json["type"] == "error") {
-                std::cerr << "\nAn error has been occured!\nError source: " << json["src"] << "\nError text: " << json["msg"] << "\nPress ENTER to continue." << std::endl;
-                return Message(0, 0, "!server", name, "error: " + std::string(json["msg"]));
-            }
-            return db.contact(Message(json["id"], json["time"], json["src"], json["dst"], json["msg"]));
-        } catch (const std::exception& e) {
-            std::cerr << "Failed to parse incoming message JSON: " << e.what() << "\nRaw: " << msg << std::endl;
-            return PULSAR_NO_MESSAGE;
-        } catch (...) {
-            std::cerr << "Unknown error parsing incoming message. Raw: " << msg << std::endl;
-            return PULSAR_NO_MESSAGE;
-        }
-    }
-
-    // bad working function
-    Message getMsgById(const std::string& chat, size_t id) {
-        auto response = request("msg", jsonToString(Json::array({chat, id})), std::to_string(id));
-        if (response.find("msg") != std::string::npos) {
-            return parse_line(response.substr(4), chat);
-        }
-        return PULSAR_NO_MESSAGE;
-    }
-
-    void storeUnread(const Message& msg) {
-        db.store_unread(msg);
+        return Message { id, msg.get_time().toTime(), msg.get_src(), chat, msg.get_msg() };
     }
 
     std::vector<Message> getUnread() {
-        std::vector<Message> ret;
-        auto msg = PULSAR_NO_MESSAGE;
-        for (auto i : db.get_unread()) {
-            ret.push_back(msg.from_json(i));
-        }
-        return ret;
+        return db.get_unread();
     }
 
-    void sendUnread() {
-        auto unread = db.get_unread();
-        if (unread.size() == 0) return;
-
-        std::vector<Json> vec;
-        for (auto i : unread) {
-            Json payload;
-            payload["id"] = i["id"];
-            payload["dst"] = i["dst"];
-            vec.push_back(payload);
-        }
-
-        request("unread", jsonToString(Json::array({vec})));
-    }
-
-    void requestUnread() {
-        auto response = request("db user", name);
-        try {
-            auto parsed = Json::parse(response.substr(8, std::string::npos));
-            if (!parsed.contains("unread")) return;
-            std::vector<Json> vec = parsed["unread"];
-            for (auto json : vec) {
-                std::string chat_str = json["chat"];
-                size_t id = json["id"];
-                auto chat = getChat(chat_str);
-                auto msg = chat.getByID(id);
-                if (msg != PULSAR_NO_MESSAGE) db.store_unread(msg);
-            }
-        } catch (const std::exception& e) {
-            std::cerr << "Failed to parse unread list JSON: " << e.what() << " Response: " << response << std::endl;
-            return;
-        } catch (...) {
-            std::cerr << "Unknown error parsing unread list. Response: " << response << std::endl;
-            return;
-        }
-    }
-
-    void read(const std::string& chat, size_t id) {
+    bool read(const std::string& chat, size_t id) {
         db.read(chat, id);
-        request("read", jsonToString(Json::array({chat, id})));
+        return request("read", chat, id) == "+";
     }
 
     void readAll(const std::string& chat) {
-        auto unread = db.get_unread();
-        auto parser = PULSAR_NO_MESSAGE;
-        for (auto i : unread) {
-            auto msg = parser.from_json(i);
-            if (msg.get_dst() == chat) {
-                read(chat, msg.get_id());
-            }
+        for (auto i : getUnread()) {
+            if (chat == i.get_dst()) read(chat, i.get_id());
         }
     }
 
-    void storeServerResponse(const std::string& response) {
-        std::lock_guard<std::mutex> lock(responses_mutex);
-        server_responses.push_back(response);
-        if (server_responses.size() > PULSAR_MESSAGE_LIMIT) server_responses.pop_front();
-        responses_cv.notify_one();
+    void readAll() {
+        for (auto i : getUnread()) read(i.get_dst(), i.get_id());
     }
 
-    std::string request(const std::string& request_type, const std::string& args, const std::string& additional = "") {
-        sendMessage('!' + request_type + ' ' + args, "!server");
-        return waitForServerResponse(request_type, additional);
+    void requestUnread() {
+        auto response = request("getUnread");
+        
+        auto splited = split(response, ';');
+
+        for (auto unread : splited) {
+            auto chat = split(unread, '|')[0];
+            auto id = std::stoull(split(unread, '|')[1]);
+
+            auto msg = getMessageById(chat, id);
+
+            db.store_unread(msg);
+        }
     }
 };

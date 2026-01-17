@@ -9,7 +9,7 @@
 
 class Console {
 private:
-    PulsarAPI& api;
+    std::shared_ptr<PulsarAPI> api;
     std::string& dest;
     std::string& name;
 
@@ -17,8 +17,8 @@ private:
         return !(str.size() >= min);
     }
 public:
-    Console(PulsarAPI& api_ref, std::string& dest_ref, std::string& name_ref)
-     : api(api_ref), dest(dest_ref), name(name_ref) {}
+    Console(std::shared_ptr<PulsarAPI> api_ptr, std::string& dest_ref, std::string& name_ref)
+     : api(api_ptr), dest(dest_ref), name(name_ref) {}
 
     static void clear() {
         #ifdef _WIN32
@@ -38,7 +38,7 @@ public:
     }
 
     void displayUnreadMessages() {
-        auto msgs = api.getUnread();
+        auto msgs = api->getUnread();
         if (msgs.size() == 0) {
             std::cout << "У вас нет непрочитанных сообщений." << std::endl;
             return;
@@ -50,113 +50,97 @@ public:
     }
 
     int run(const std::string& command) {
-        if (command == "!exit") {
-            api.sendUnread();
-            std::cout << "Отключение..." << std::endl;
-            return PULSAR_EXIT_CODE_DISCONNECT;
+        auto split_view = split(command);
+        auto com = split_view[0];
+        if (com == "!exit") {
+            api->disconnect();
         }
-        else if (command == "!clear") {
-            clear();
+        else if (com == "!dest") {
+            dest = split_view[1];
         }
-        else if (command.substr(0, 5) == "!dest") {
-            if (checkLength(command, 7)) return PULSAR_EXIT_CODE_INVALID_ARGS;
-            if (!api.isChannelMember(command.substr(6))) return PULSAR_EXIT_CODE_NOT_A_MEMBER;
-            dest = command.substr(6);
+        else if (com == "!join") {
+            if (api->joinChannel(split_view[1])) {
+                std::cout << "Вы успешно присоеденились к каналу '" << split_view[1] << "'." << std::endl;
+            } else std::cout << "Не удалось присоедениться к каналу '" << split_view[1] << "'." << std::endl;
+        } 
+        else if (com == "!leave") {
+            if (api->leaveChannel(split_view[1])) {
+                std::cout << "Вы успешно покинули канал '" << split_view[1] << "'." << std::endl;
+            } else std::cout << "Не удалось покинуть канал '" << split_view[1] << "'." << std::endl;
         }
-        else if (command.substr(0, 5) == "!join") {
-            if (checkLength(command, 7)) return PULSAR_EXIT_CODE_INVALID_ARGS;
-            if (!api.joinChannel(command.substr(6))) return PULSAR_EXIT_CODE_FAILURE;
-            dest = command.substr(6);
+        else if (com == "!create") {
+            if (api->createChannel(split_view[1])) {
+                std::cout << "Создан канал '" << split_view[1] << "'." << std::endl;
+            } else std::cout << "Не удалось создать канал '" << split_view[1] << "'." << std::endl;
         }
-        else if (command.substr(0, 6) == "!leave") {
-            if (checkLength(command, 8)) return PULSAR_EXIT_CODE_INVALID_ARGS;
-            if (!api.leaveChannel(command.substr(7))) return PULSAR_EXIT_CODE_FAILURE;
-            dest = ":all";
+        else if (com == "!chat") {
+            auto chat = api->getChat(split_view[1]);
+            std::cout << "Чат '" << split_view[1] << "':\n" << chat.to_stream().rdbuf();
         }
-        else if (command.substr(0, 5) == "!chat") {
-            if (checkLength(command, 7)) return PULSAR_EXIT_CODE_INVALID_ARGS;
-            auto arg = command.substr(6);
-            if (!api.isChannelMember(arg)) return PULSAR_EXIT_CODE_NOT_A_MEMBER;
-            std::cout << '\n' << api.getChat(arg).to_stream().rdbuf() << std::endl;
-        }
-        else if (command.substr(0, 7) == "!create") {
-            if (checkLength(command, 9)) return PULSAR_EXIT_CODE_INVALID_ARGS;
-            auto arg = command.substr(8);
-            if (!api.createChannel(arg)) return PULSAR_EXIT_CODE_FAILURE;
-            dest = arg;
-        }
-        else if (command.substr(0, 8) == "!contact") {
-            if (checkLength(command, 15)) return PULSAR_EXIT_CODE_INVALID_ARGS;
-            auto com = command.substr(9, 3);
-            auto arg = command.substr(13);
-            if (com == "add") {
-                auto name = arg.substr(0, arg.find(' '));
-                auto cont = arg.substr(arg.find(' ') + 1);
-                api.createContact(name, cont);
-            } else if (com == "rem") {
-                api.removeContact(arg);
-            }
-        }
-        else if (command.substr(0, 8) == "!profile") {
-            if (checkLength(command, 10)) return PULSAR_EXIT_CODE_INVALID_ARGS;
-            auto arg = command.substr(9);
+        else if (com == "!profile") {
+            auto arg = split_view[1];
+
             if (arg == "edit") {
-                std::string description;
-                std::string email;
-                std::string realName;
-                std::string birthday_str;
+                std::string description, email, realName, birthday;
 
                 std::cout << "Введите новое описание: ";
                 std::getline(std::cin, description);
-                std::cout << "Введите новый email: ";
+                std::cout << "Введите новый Email: ";
                 std::getline(std::cin, email);
-                std::cout << "Введите новое имя (настоящее): ";
+                std::cout << "Введите новое имя: ";
                 std::getline(std::cin, realName);
                 std::cout << "Введите новый день рождения (одно число): ";
-                std::getline(std::cin, birthday_str);
-                auto birthday = std::stoll(birthday_str);
+                std::getline(std::cin, birthday);
 
-                api.updateProfile(Profile(description, email, realName, Datetime(birthday)));
+                Profile p { description, email, realName, Datetime(std::stol(birthday)) };
+                
+                if (api->updateProfile(p)) {
+                    std::cout << "Профиль обновлен." << std::endl;
+                } else std::cout << "Не удалось обновить профиль." << std::endl;
             } else {
-                std::cout << "Если вы ожидаете слишком долго, значит профиля не существует." << std::endl;
-                auto profile = api.getProfile(arg);
-                std::cout << "Профиль пользователя " << arg << ":" \
-                << "\n\tОписание: " << profile.description() \
-                << "\n\tEmail: " << profile.email() \
-                << "\n\tИмя: " << profile.realName() \
-                << "\n\tДень рождения: " << profile.birthday().toTime() \
-                << std::endl;
+                auto profile = api->getProfile(arg);
+
+                std::cout << "Профиль '" << arg << "':";
+                std::cout << "\n\tОписание: " << profile.description();
+                std::cout << "\n\tEmail: " << profile.email();
+                std::cout << "\n\tИмя: " << profile.realName();
+                std::cout << "\n\tДень рождения: " << profile.birthday().toTime() << std::endl;
             }
         }
-        else if (command == "!unread") {
+        else if (com == "!contact") {
+            auto act = split_view[1];
+            auto username = split_view[2];
+
+            if (act == "add") {
+                if (api->createContact(username, split_view[3])) {
+                    std::cout << "Создан контакт '" << split_view[3] << "'." << std::endl;
+                } else std::cout << "Не удалось создать контакт '" << split_view[3] << "'." << std::endl;
+            } else if (act == "rem") {
+                if (api->removeContact(username)) {
+                    std::cout << "Удален контакт для '" << username << "'." << std::endl;
+                } else std::cout << "Не удалось удалить контакт для '" << username << "'." << std::endl;
+            }
+        }
+        else if (com == "!unread") {
             displayUnreadMessages();
         }
-        else if (command.substr(0, 5) == "!read") {
-            if (checkLength(command, 7)) return PULSAR_EXIT_CODE_INVALID_ARGS;
-            auto rest = command.substr(6);
-            auto chat = rest.substr(0, rest.find(' '));
-            if (chat == "all") {
-                api.readAll(dest);
-                std::cout << "Все сообщения в чате " << dest << " помечены как прочитанные." << std::endl;
-                return PULSAR_EXIT_CODE_SUCCESS;
-            }
+        else if (com == "!read") {
+            if (split_view.size() == 2 && split_view[1] == "all") api->readAll();
 
-            auto id_str = rest.substr(rest.find(' ') + 1);
-            size_t id = 0;
-            try {
-                id = std::stoull(id_str);
-            } catch (...) {
-                std::cout << "Неправильный ID сообщения: " << id_str << std::endl;
-                return PULSAR_EXIT_CODE_INVALID_ARGS;
+            auto chat = split_view[1];
+            auto arg = split_view[2];
+
+            if (arg == "all") {
+                api->readAll(chat);
+            } else {
+                api->read(chat, std::stoll(arg));
             }
-            api.read(chat, id);
-            std::cout << "Сообщение с ID " << id << " в чате " << chat << " помечено как прочитанные." << std::endl;
         }
         else if (command == "!fastfetch") {
             const std::vector<std::string> info = {
                 "Pulsar Client " + std::string(PULSAR_VERSION),
                 "Пользователь: " + name,
-                "Сервер: " + api.getSocket().getRemoteAddress()->toString() + ":" + std::to_string(api.getSocket().getRemotePort())
+                "Сервер: " + api->getSocket()->getRemoteAddress()->toString() + ":" + std::to_string(api->getSocket()->getRemotePort())
             };
             fastfetch(info);
         }
@@ -167,16 +151,6 @@ public:
             if (checkLength(command, 7)) help("!help");
             else help(command.substr(6));
         }
-        #ifdef PULSAR_DEBUG
-        else if (message == "!l") {
-            std::cout << "\n[DEBUG]: " << api.getLastResponse() << std::endl;
-            continue;
-        }
-        else if (message == "!cldb") {
-            std::cout << api.getDbString() << std::endl;
-            continue;
-        }
-        #endif
         else {
             if (command[0] == '!')
             return PULSAR_EXIT_CODE_INVALID_COMMAND;
@@ -198,9 +172,6 @@ public:
                         "!read <chat> <id>|all                         - Прочитать сообщение по ID из чата\n"
                         "!fastfetch                                    - Вывести информацию о клиенте\n"
                         "!help                                         - Вывести это окно\n"
-                        "\tDebug-команды (доступны только в Debug-сборках):\n"
-                        "!l                                            - Последний ответ от сервера\n"
-                        "!cldb                                         - Клиентская база данных\n"
         << std::flush;
     }
 

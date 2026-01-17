@@ -1,6 +1,9 @@
 #pragma once
 
 #include <string>
+#include "../defines"
+#include <sstream>
+#include <vector>
 #include "Datetime.hpp"
 
 class Profile {
@@ -36,25 +39,26 @@ public:
         m_birthday = birthday;
     }
 
+    std::string to_payload() const {
+        std::ostringstream oss;
 
-    static Profile fromJson(const Json& json) {
-        Profile inst = PULSAR_NO_PROFILE;
-        inst.m_description = json["description"];
-        inst.m_email = json["email"];
-        inst.m_realName = json["name"];
-        inst.m_birthday = Datetime(json["birthday"]);
+        oss << m_description << PULSAR_PROFILE_SEP;
+        oss << m_email << PULSAR_PROFILE_SEP;
+        oss << m_realName << PULSAR_PROFILE_SEP;
+        oss << m_birthday.toTime();
 
-        return inst;
+        return oss.str();
     }
 
-    Json toJson() const {
-        Json json;
+    static Profile from_payload(const std::string& payload) {
+        std::vector<std::string> parts;
+        std::istringstream iss(payload);
+        std::string part;
 
-        json["description"] = description();
-        json["email"] = email();
-        json["name"] = realName();
-        json["birthday"] = birthday().toTime();
+        while (std::getline(iss, part, PULSAR_PROFILE_SEP)) {
+            parts.push_back(part);
+        }
 
-        return json;
+        return Profile(parts[0], parts[1], parts[2], Datetime::fromString(parts[3]));
     }
 };

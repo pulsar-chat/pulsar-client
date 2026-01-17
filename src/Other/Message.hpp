@@ -1,84 +1,98 @@
 #pragma once
 
-#include "../lib/jsonlib.h"
 #include "../defines"
+#include "Datetime.hpp"
+#include <string>
+#include <ostream>
+#include <sstream>
+#include <iomanip>
+
+template <typename _Tp>
+inline std::string stringify(_Tp&& arg) {
+    std::ostringstream oss;
+    oss << std::forward<_Tp>(arg);
+    return oss.str();
+}
+
+template <typename _Tp>
+inline std::string align_right(size_t size, _Tp&& arg, char fill = ' ') {
+    std::string str = stringify(std::forward<_Tp>(arg));
+    auto s_size = str.size();
+    auto delta = size - s_size;
+    std::string res;
+
+    for (size_t i = 0; i < delta; i++) res.push_back(fill);
+
+    for (const auto& c : str) res.push_back(c);
+
+    return res;
+}
+
+inline void remove_spaces(std::string& s) {
+    s.erase(
+        std::remove_if(s.begin(), s.end(),
+            [](unsigned char c){ return std::isspace(c); }),
+        s.end()
+    );
+}
 
 class Message {
 private:
     size_t id;
-    time_t datetime;
+    Datetime time;
     std::string src;
-    std::string msg;
     std::string dst;
+    std::string msg;
 public:
-    Message(size_t id, time_t datetime, const std::string& src, const std::string& dst, const std::string& msg)
-     : id(id), datetime(datetime), src(src), dst(dst), msg(msg) {}
+    Message() : id(0), time(0), src(""), dst(""), msg("") {}
 
-    time_t get_time() const { return datetime; }
-    std::string get_src() const { return src; }
-    std::string get_dst() const { return dst; }
-    std::string get_msg() const { return msg; }
+    Message(size_t id, const std::string& src, const std::string& dst, const std::string& msg)
+     : id(id), src(src), dst(dst), msg(msg), time(Datetime::now()) {}
 
-    Json to_json() const {
-        return Json({
-            {"time", datetime},
-            {"id", id},
-            {"src", src},
-            {"dst", dst},
-            {"msg", msg}
-        });
+     Message(size_t id, time_t time, const std::string& src, const std::string& dst, const std::string& msg)
+     : id(id), src(src), dst(dst), msg(msg), time(time) {}
+
+    inline size_t get_id() const { return id; }
+    inline Datetime get_time() const { return time; }
+    inline std::string get_src() const { return src; }
+    inline std::string get_dst() const { return dst; }
+    inline std::string get_msg() const { return msg; }
+
+    std::string to_payload() const {
+        std::ostringstream oss;
+
+        oss << align_right(PULSAR_ID_SIZE, id, '0');
+        oss << align_right(PULSAR_TIME_SIZE, time.toTime(), '0');
+        oss << align_right(PULSAR_SRC_SIZE, src);
+        oss << align_right(PULSAR_DST_SIZE, dst);
+        oss << msg;
+
+        return oss.str();
     }
 
-    Message& from_json(const Json& json) {
-        id = json["id"];
-        datetime = json["time"];
-        src = json["src"];
-        dst = json["dst"];
-        msg = json["msg"];
-
-        return *this;
+    static std::string to_payload(const Message& message) {
+        return message.to_payload();
     }
 
-    bool operator==(const Message& other) const {
-        return (
-            id == other.id && \
-            datetime == other.datetime && \
-            src == other.src && \
-            dst == other.dst && \
-            msg == other.msg
-        );
-    }
+    static Message from_payload(const std::string& payload) {
+        size_t id;
+        time_t time;
+        std::string src, dst, msg;
+        
+        id = std::stoul(payload.substr(0, PULSAR_ID_SIZE));
+        time = std::stol(payload.substr(PULSAR_ID_SIZE, PULSAR_TIME_SIZE));
+        src = payload.substr(PULSAR_ID_SIZE + PULSAR_TIME_SIZE, PULSAR_SRC_SIZE);
+        dst = payload.substr(PULSAR_ID_SIZE + PULSAR_TIME_SIZE + PULSAR_SRC_SIZE, PULSAR_DST_SIZE);
+        msg = payload.substr(PULSAR_ID_SIZE + PULSAR_TIME_SIZE + PULSAR_SRC_SIZE + PULSAR_DST_SIZE);
 
-    bool operator!=(const Message& other) const {
-        return !(*(this) == other);
+        remove_spaces(src);
+        remove_spaces(dst);
+        
+        return { id, time, src, dst, msg };
     }
-
-    size_t get_id() const {
-        return id;
-    }
-
-    std::string to_string() const {
-        std::stringstream ss;
-        ss << *this;
-        return ss.str();
-    }
-
-    friend std::ostream& operator<<(std::ostream& stream, const Message& message) {
-        Message out = message;
-        if (out == PULSAR_NO_MESSAGE) return stream;
-        if (out.msg.back() == '\n') out.msg.pop_back();
-        stream << "(" << out.id << ")[" << Datetime(out.datetime).toFormattedString() << " от " << out.src << " в " << out.dst << "]: " << out.msg;
-        return stream;
-    }
-
-    friend class Database;
 };
 
-static Message parse_line(const std::string& line, const std::string& destination) {
-    auto l_id = line.substr(0, PULSAR_ID_SIZE);
-    auto l_time = line.substr(PULSAR_ID_SIZE, PULSAR_DATE_SIZE);
-    auto l_src = line.substr(PULSAR_ID_SIZE + PULSAR_DATE_SIZE, line.find(PULSAR_SEP) - (PULSAR_ID_SIZE + PULSAR_DATE_SIZE));
-    auto l_msg = line.substr(line.find(PULSAR_SEP) + 1);
-
-    return Message(std::stoull(l_id), atoll(l_time.c_str()), l_src, destination, l_msg);
-}
+inline std::ostream& operator<<(std::ostream& os, const Message& m) {
+    os << "<" << m.get_time().toFormattedString() << "> [id:" << m.get_id() << "] (от " << m.get_src() << " в " << m.get_dst() << "): " << m.get_msg();
+    return os;
+};

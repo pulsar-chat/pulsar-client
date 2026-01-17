@@ -4,24 +4,33 @@
 // #define PULSAR_DEV
 // #define PULSAR_GUI
 #define PULSAR
-#define PULSAR_VERSION "v0.0.1"
-#define PULSAR_ID_SIZE 20
-#define PULSAR_DATE_SIZE 10
-#define PULSAR_USERNAME_SIZE 24
-#define PULSAR_MESSAGE_SIZE 1024
-#define PULSAR_SPECIALS_SIZE 128
-#define PULSAR_PACKET_SIZE ((PULSAR_ID_SIZE + PULSAR_DATE_SIZE + PULSAR_USERNAME_SIZE + PULSAR_MESSAGE_SIZE + PULSAR_SPECIALS_SIZE) * PULSAR_MAX_MESSAGES)
+#define PULSAR_VERSION "v0.1.2"
+
+#define PULSAR_ID_SIZE          20
+#define PULSAR_TIME_SIZE        10
+#define PULSAR_SRC_SIZE         32
+#define PULSAR_DST_SIZE         32
+#define PULSAR_MSG_SIZE         1024
+#define PULSAR_RESERVED_SIZE    32
+
+#define PULSAR_USERNAME_SIZE PULSAR_DST_SIZE
+
+#define PULSAR_PACKET_SIZE (PULSAR_ID_SIZE + PULSAR_TIME_SIZE + PULSAR_SRC_SIZE + PULSAR_DST_SIZE + PULSAR_MSG_SIZE + PULSAR_RESERVED_SIZE)
+
 #define PULSAR_SALT "57afbe95a4be3a9d"
 #define PULSAR_HASH_ITERATIONS 10000
-#define PULSAR_MAX_MESSAGES 100
+
 #define PULSAR_EOT '\x04'
 #define PULSAR_SEP '\x1f'
+#define PULSAR_PROFILE_SEP '\x1d'
 #define PULSAR_PORT 4171
-#define PULSAR_MESSAGE_LIMIT 50
 #define PULSAR_TIMEOUT_MS 5000
-#define PULSAR_NO_CONTACT std::string("@none") + PULSAR_EOT
-#define PULSAR_NO_PROFILE Profile("", "", "", Datetime(0x0))
-#define PULSAR_NO_MESSAGE Message(0ull, 0ll, "", "", "")
+
+#define PULSAR_NO_MESSAGE Message(0, 0, "", "", "")
+
+#define PULSAR_MAX_RESPONSES 10
+
+// #define PULSAR_RSA_TEST false // if defined, performing RSA test. set to true to see full logs
 
 #ifdef PULSAR_DEV
     #define PULSAR_IP_PRESET "127.0.0.1"

@@ -1,148 +1,111 @@
 #pragma once
 
-#include "../lib/jsonlib.h"
 #include "../Other/Profile.hpp"
 #include "../Other/Message.hpp"
 #include "../defines"
-
-/*
-    Client's Database structure (JSON):
-    {
-        "type": "database",
-        "users": {
-            "@user": {
-                "name": "user's real name (string)",
-                "channels": [array with channels names],
-                "contacts": {
-                    "@username": "contact name (string)"
-                },
-                "email": "user's email (string)",
-                "birthday": user's birthday (0 if nothings set),
-                "description": "description (string)",
-                "status": "active/inactive/banned (string)"
-            }
-            in client's database the user's count will be always 1
-        }
-    }
-*/
+#include "SQLite3.hpp"
+#include <string>
+#include <vector>
+#include <sstream>
 
 class Database {
 private:
-    Json db;
+    SQLite3Database db;
     std::string username;
-    using Key = const std::string&;
-    using Str = const std::string&;
 public:
-    Database(const std::string& username) : username(username) {
-        db = Json({
-           {"type", "database"},
-           {"users", Json({
-            {username, Json({
-                {"name", "NAME"},
-                {"channels", Json::array()},
-                {"contacts", Json::object()},
-                {"email", "EMAIL"},
-                {"status", "STATUS"}
-            })}
-           })}
-        });
+    Database(const std::string& username)
+     : db(("pulsar_" + username + ".db")), username(username) {
+        db.execute("PRAGMA foreign_keys = ON;");
+        db.execute("CREATE TABLE IF NOT EXISTS profile (username TEXT PRIMARY KEY, name TEXT, email TEXT, description TEXT, birthday INTEGER, status TEXT);");
+        db.execute("CREATE TABLE IF NOT EXISTS channels (username TEXT, channel TEXT, PRIMARY KEY(username, channel));");
+        db.execute("CREATE TABLE IF NOT EXISTS contacts (username TEXT, contact_username TEXT, contact_name TEXT, PRIMARY KEY(username, contact_username));");
+        db.execute("CREATE TABLE IF NOT EXISTS unread (username TEXT, id INTEGER, time INTEGER, src TEXT, dst TEXT, msg TEXT, PRIMARY KEY(username, id, src, dst));");
+        try {
+            db.execute("INSERT OR IGNORE INTO profile(username, name, email, description, birthday, status) VALUES ('" + username + "', 'NAME', '', '', 0, 'active');");
+        } catch(...) {}
     }
 
     std::string getString() {
-        return jsonToString(db);
+        return "sqlite3://pulsar_" + username + ".db";
     }
 
-    void init(const Json& json) {
-        db["users"][username]["name"] = json["name"];
-        db["users"][username]["channels"] = json["channels"];
-        db["users"][username]["contacts"] = json["contacts"];
-        db["users"][username]["email"] = json["email"];
-        db["users"][username]["status"] = json["status"];
+    void init(const std::string& name, const std::string& email, const std::string& description, time_t birthday, const std::string& status) {
+        std::ostringstream oss;
+        oss << "INSERT OR REPLACE INTO profile(username, name, email, description, birthday, status) VALUES ('" << username << "', '" << name << "', '" << email << "', '" << description << "', " << birthday << ", '" << status << "');";
+        db.execute(oss.str());
     }
 
     bool is_channel_member(const std::string& channel) {
-        if (channel[0] == '@' || channel[0] == '!') return true; // It's not a channel, it's a user or a special destination
-        std::vector<std::string> channels = db["users"][username]["channels"];
-        for (auto& i : channels) {
-            if (i == channel) return true;
-        }
-        return false;
+        if (channel.empty()) return false;
+        if (channel[0] == '@' || channel[0] == '!') return false;
+        bool exists = false;
+        db.query("SELECT 1 FROM channels WHERE username='" + username + "' AND channel='" + channel + "' LIMIT 1;",
+                 [&](const SQLite3Database::Row& row){ exists = true; });
+        return exists;
     }
 
     void join(const std::string& channel) {
-        db["users"][username]["channels"].push_back(channel);
+        db.execute("INSERT OR IGNORE INTO channels(username, channel) VALUES ('" + username + "', '" + channel + "');");
     }
 
     void leave(const std::string& channel) {
-        std::vector<std::string> channels = db["users"][username]["channels"];
-        db["users"][username]["channels"] = Json::array();
-        for (auto& i : channels) {
-            if (i != channel) {
-                db["users"][username]["channels"].push_back(i);
-            }
-        }
+        db.execute("DELETE FROM channels WHERE username='" + username + "' AND channel='" + channel + "';");
     }
 
-    void add_contact(Key username, Str contact) {
-        db["users"][this->username]["contacts"][username] = contact;
+    void add_contact(const std::string& contact_username, const std::string& contact_name) {
+        db.execute("INSERT OR REPLACE INTO contacts(username, contact_username, contact_name) VALUES ('" + username + "', '" + contact_username + "', '" + contact_name + "');");
     }
 
-    void remove_contact(Key contact) {
-        if (!db["users"][username]["contacts"].contains(contact)) return;
-        auto items_copy = db["users"][username]["contacts"].items();
-        db["users"][username]["contacts"] = Json::object();
-        for (auto& [key, val] : items_copy) {
-            if (key != contact) db["users"][username]["contacts"][key] = val;
-        }
+    void remove_contact(const std::string& contact_username) {
+        db.execute("DELETE FROM contacts WHERE username='" + username + "' AND contact_username='" + contact_username + "';");
     }
 
-    std::string contact(Key contact) {
-        if (!db["users"][username]["contacts"].contains(contact)) return PULSAR_NO_CONTACT;
-
-        return db["users"][username]["contacts"][contact];
+    std::string contact_name(const std::string& contact_username) {
+        std::string res;
+        db.query("SELECT contact_name FROM contacts WHERE username='" + username + "' AND contact_username='" + contact_username + "' LIMIT 1;",
+                 [&](const SQLite3Database::Row& row){ res = row[0]; });
+        return res;
     }
 
     Message contact(const Message& msg) {
-        Message new_msg = msg;
-        std::string contact_name = contact(msg.src);
-        if (contact_name != PULSAR_NO_CONTACT) {
-            new_msg.src = contact_name;
-        }
-        return new_msg;
+        std::string cname = contact_name(msg.get_src());
+        if (cname.empty()) return msg;
+        return Message(msg.get_id(), msg.get_time().toTime(), cname, msg.get_dst(), msg.get_msg());
     }
 
     void update_profile(const Profile& profile) {
-        db["users"][username]["description"] = profile.description();
-        db["users"][username]["email"] = profile.email();
-        db["users"][username]["name"] = profile.realName();
-        db["users"][username]["birthday"] = profile.birthday().toTime();
+        std::ostringstream oss;
+        oss << "INSERT OR REPLACE INTO profile(username, name, email, description, birthday, status) VALUES ('" << username << "', '" << profile.realName() << "', '" << profile.email() << "', '" << profile.description() << "', " << profile.birthday().toTime() << ", 'active');";
+        db.execute(oss.str());
     }
 
     void store_unread(const Message& msg) {
-        if (msg == PULSAR_NO_MESSAGE) return;
-        db["users"][username]["unread"].push_back(msg.to_json());
+        std::ostringstream oss;
+        oss << "INSERT OR REPLACE INTO unread(username, id, time, src, dst, msg) VALUES ('" << username << "', " << msg.get_id() << ", " << msg.get_time().toTime() << ", '" << msg.get_src() << "', '" << msg.get_dst() << "', '" << msg.get_msg() << "');";
+        db.execute(oss.str());
     }
 
-    std::vector<Json> get_unread() {
-        if (!db["users"][username].contains("unread")) return {};
-        return db["users"][username]["unread"].get<std::vector<Json>>();
+    std::vector<Message> get_unread() {
+        std::vector<Message> out;
+        db.query("SELECT id, time, src, dst, msg FROM unread WHERE username='" + username + "' ORDER BY time ASC;",
+                 [&](const SQLite3Database::Row& row){
+                     size_t id = std::stoull(row[0]);
+                     time_t t = static_cast<time_t>(std::stoull(row[1]));
+                     std::string src = row[2];
+                     std::string dst = row[3];
+                     std::string text = row[4];
+                     out.emplace_back(id, t, src, dst, text);
+                 });
+        return out;
     }
 
     void read(const std::string& chat, size_t id) {
-        if (!db["users"][username].contains("unread")) return;
-        auto items_copy = db["users"][username]["unread"].get<std::vector<Json>>();
-        db["users"][username]["unread"] = Json::array();
-        Message parser = PULSAR_NO_MESSAGE;
-        for (auto& item : items_copy) {
-            Message msg = parser.from_json(item);
-            if (msg.get_dst() == chat && msg.get_id() == id) {
-                continue;
-            }
-            db["users"][username]["unread"].push_back(item);
-        }
+        std::ostringstream oss;
+        oss << "DELETE FROM unread WHERE username='" << username << "' AND id=" << id << " AND dst='" << chat << "';";
+        db.execute(oss.str());
     }
 
     void clear_unread() {
-        db["users"][username]["unread"] = Json::array();
+        db.execute("DELETE FROM unread WHERE username='" + username + "';");
     }
 };
